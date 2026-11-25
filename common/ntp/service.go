@@ -3,6 +3,7 @@ package ntp
 import (
 	"context"
 	"os"
+	"sync/atomic"
 	"time"
 
 	"github.com/metacubex/sing/common"
@@ -43,7 +44,7 @@ type Service struct {
 	ticker        *time.Ticker
 	interval      time.Duration
 	timeout       time.Duration
-	clockOffset   time.Duration
+	clockOffset   atomic.Int64
 	pause         pause.Manager
 	pauseCallback *list.Element[pause.Callback]
 }
@@ -107,6 +108,10 @@ func (s *Service) Start() error {
 }
 
 func (s *Service) Close() error {
+	if s.pause != nil && s.pauseCallback != nil {
+		s.pause.UnregisterCallback(s.pauseCallback)
+		s.pauseCallback = nil
+	}
 	if s.ticker != nil {
 		s.ticker.Stop()
 	}
@@ -116,7 +121,7 @@ func (s *Service) Close() error {
 
 func (s *Service) TimeFunc() func() time.Time {
 	return func() time.Time {
-		return time.Now().Add(s.clockOffset)
+		return time.Now().Add(time.Duration(s.clockOffset.Load()))
 	}
 }
 
@@ -153,7 +158,7 @@ func (s *Service) update() error {
 	if err != nil {
 		return err
 	}
-	s.clockOffset = response.ClockOffset
+	s.clockOffset.Store(int64(response.ClockOffset))
 	if s.writeToSystem {
 		writeErr := SetSystemTime(s.TimeFunc()())
 		if writeErr != nil {

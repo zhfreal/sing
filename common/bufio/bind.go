@@ -2,6 +2,8 @@ package bufio
 
 import (
 	"net"
+	"net/netip"
+	"sync/atomic"
 
 	"github.com/metacubex/sing/common/buf"
 	M "github.com/metacubex/sing/common/metadata"
@@ -117,39 +119,71 @@ func NewServerPacketConn(conn net.PacketConn) N.ExtendedConn {
 	}
 }
 
+func NewServerPacketConnWithSource(conn net.PacketConn, expectedSource netip.Addr) N.ExtendedConn {
+	return &serverPacketConn{
+		NetPacketConn:  NewPacketConn(conn),
+		expectedSource: expectedSource.Unmap(),
+	}
+}
+
 type serverPacketConn struct {
 	N.NetPacketConn
-	remoteAddr M.Socksaddr
+	expectedSource netip.Addr
+	remoteAddr     atomic.Pointer[M.Socksaddr]
+}
+
+func (c *serverPacketConn) isAllowedSource(source M.Socksaddr) bool {
+	if !c.expectedSource.IsValid() {
+		return true
+	}
+	return source.Addr.Unmap() == c.expectedSource
 }
 
 func (c *serverPacketConn) Read(p []byte) (n int, err error) {
-	n, addr, err := c.NetPacketConn.ReadFrom(p)
-	if err != nil {
-		return
+	for {
+		n, addr, err := c.NetPacketConn.ReadFrom(p)
+		if err != nil {
+			return 0, err
+		}
+		source := M.SocksaddrFromNet(addr)
+		if !c.isAllowedSource(source) {
+			continue
+		}
+		c.remoteAddr.Store(&source)
+		return n, nil
 	}
-	c.remoteAddr = M.SocksaddrFromNet(addr)
-	return
 }
 
 func (c *serverPacketConn) ReadBuffer(buffer *buf.Buffer) error {
-	destination, err := c.NetPacketConn.ReadPacket(buffer)
-	if err != nil {
-		return err
+	for {
+		destination, err := c.NetPacketConn.ReadPacket(buffer)
+		if err != nil {
+			return err
+		}
+		if !c.isAllowedSource(destination) {
+			buffer.Truncate(0)
+			continue
+		}
+		c.remoteAddr.Store(&destination)
+		return nil
 	}
-	c.remoteAddr = destination
-	return nil
 }
 
 func (c *serverPacketConn) Write(p []byte) (n int, err error) {
-	return c.NetPacketConn.WriteTo(p, c.remoteAddr.UDPAddr())
+	remote := c.RemoteAddr().(M.Socksaddr)
+	return c.NetPacketConn.WriteTo(p, remote.UDPAddr())
 }
 
 func (c *serverPacketConn) WriteBuffer(buffer *buf.Buffer) error {
-	return c.NetPacketConn.WritePacket(buffer, c.remoteAddr)
+	remote := c.RemoteAddr().(M.Socksaddr)
+	return c.NetPacketConn.WritePacket(buffer, remote)
 }
 
 func (c *serverPacketConn) RemoteAddr() net.Addr {
-	return c.remoteAddr
+	if addr := c.remoteAddr.Load(); addr != nil {
+		return *addr
+	}
+	return M.Socksaddr{}
 }
 
 func (c *serverPacketConn) Upstream() any {

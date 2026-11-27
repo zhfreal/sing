@@ -185,7 +185,7 @@ func HandleConnection0(ctx context.Context, conn net.Conn, reader *std_bufio.Rea
 				return err
 			}
 			if response.Status != socks5.UsernamePasswordStatusSuccess {
-				return E.New("socks5: authentication failed, username=", usernamePasswordAuthRequest.Username, ", password=", usernamePasswordAuthRequest.Password)
+				return E.New("socks5: authentication failed, username=", usernamePasswordAuthRequest.Username)
 			}
 		}
 		request, err := socks5.ReadRequest(reader)
@@ -222,7 +222,8 @@ func HandleConnection0(ctx context.Context, conn net.Conn, reader *std_bufio.Rea
 			metadata.Destination = request.Destination
 			var innerError error
 			done := make(chan struct{})
-			associatePacketConn := NewAssociatePacketConn(bufio.NewServerPacketConn(udpConn), request.Destination, conn)
+			clientIP := M.AddrFromNet(conn.RemoteAddr())
+			associatePacketConn := NewAssociatePacketConn(bufio.NewServerPacketConnWithSource(udpConn, clientIP), request.Destination, conn)
 			go func() {
 				innerError = handler.NewPacketConnection(ctx, associatePacketConn, metadata)
 				close(done)

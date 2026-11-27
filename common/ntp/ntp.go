@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"time"
 
 	M "github.com/metacubex/sing/common/metadata"
@@ -16,7 +17,11 @@ func Exchange(ctx context.Context, dialer N.Dialer, serverAddress M.Socksaddr) (
 		return nil, err
 	}
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(defaultTimeout))
+	deadline := time.Now().Add(defaultTimeout)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	conn.SetDeadline(deadline)
 
 	var request msg
 	request.setMode(client)
@@ -45,7 +50,18 @@ func Exchange(ctx context.Context, dialer N.Dialer, serverAddress M.Socksaddr) (
 		return nil, err
 	}
 
+	if response.OriginTime != request.TransmitTime {
+		return nil, errors.New("ntp: origin timestamp mismatch")
+	}
+	if response.getMode() != server {
+		return nil, errors.New("ntp: unexpected response mode")
+	}
+
 	recvTime := toNtpTime(xmitTime.Add(time.Since(xmitTime)))
 	response.OriginTime = toNtpTime(xmitTime)
-	return parseTime(&response, recvTime), nil
+	parsed := parseTime(&response, recvTime)
+	if err = parsed.Validate(); err != nil {
+		return nil, err
+	}
+	return parsed, nil
 }

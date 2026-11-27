@@ -1,6 +1,8 @@
 package auth
 
-import "github.com/metacubex/sing/common"
+import (
+	"crypto/subtle"
+)
 
 type User struct {
 	Username string
@@ -26,5 +28,12 @@ func NewAuthenticator(users []User) *Authenticator {
 
 func (au *Authenticator) Verify(username string, password string) bool {
 	passwordList, ok := au.userMap[username]
-	return ok && common.Contains(passwordList, password)
+	if !ok {
+		return false
+	}
+	matched := 0
+	for _, expected := range passwordList {
+		matched |= subtle.ConstantTimeCompare([]byte(expected), []byte(password))
+	}
+	return matched == 1
 }

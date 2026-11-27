@@ -47,12 +47,13 @@ func (c *CachedConn) Read(p []byte) (n int, err error) {
 func (c *CachedConn) WriteTo(w io.Writer) (n int64, err error) {
 	if c.buffer != nil {
 		wn, wErr := w.Write(c.buffer.Bytes())
-		if wErr != nil {
-			c.buffer.DecRef()
-			c.buffer.Release()
-			c.buffer = nil
-		}
+		c.buffer.DecRef()
+		c.buffer.Release()
+		c.buffer = nil
 		n += int64(wn)
+		if wErr != nil {
+			return n, wErr
+		}
 	}
 	cn, err := Copy(w, c.Conn)
 	n += cn

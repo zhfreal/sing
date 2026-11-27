@@ -33,7 +33,7 @@ func (w *AssociatePacketReadWaiter) WaitReadPacket() (buffer *buf.Buffer, destin
 	if err != nil {
 		return
 	}
-	if buffer.Len() < 3 {
+	if buffer.Len() < 3 || buffer.Byte(2) != 0 {
 		buffer.Release()
 		return nil, M.Socksaddr{}, ErrInvalidPacket
 	}
@@ -43,6 +43,6 @@ func (w *AssociatePacketReadWaiter) WaitReadPacket() (buffer *buf.Buffer, destin
 		buffer.Release()
 		return
 	}
-	w.conn.remoteAddr = destination
+	w.conn.remoteAddr.Store(&destination)
 	return
 }

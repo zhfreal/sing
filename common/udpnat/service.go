@@ -5,6 +5,8 @@ import (
 	"io"
 	"net"
 	"os"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/metacubex/sing/common"
@@ -15,6 +17,8 @@ import (
 	N "github.com/metacubex/sing/common/network"
 	"github.com/metacubex/sing/common/pipe"
 )
+
+const defaultMaxNATEntries = 4096
 
 type Handler interface {
 	N.UDPConnectionHandler
@@ -27,14 +31,22 @@ type Service[K comparable] struct {
 }
 
 func New[K comparable](maxAge int64, handler Handler) *Service[K] {
+	return NewWithSize[K](maxAge, defaultMaxNATEntries, handler)
+}
+
+func NewWithSize[K comparable](maxAge int64, maxSize int, handler Handler) *Service[K] {
+	options := []cache.Option[K, *conn]{
+		cache.WithAge[K, *conn](maxAge),
+		cache.WithUpdateAgeOnGet[K, *conn](),
+		cache.WithEvict[K, *conn](func(key K, conn *conn) {
+			conn.Close()
+		}),
+	}
+	if maxSize > 0 {
+		options = append(options, cache.WithSize[K, *conn](maxSize))
+	}
 	return &Service[K]{
-		nat: cache.New(
-			cache.WithAge[K, *conn](maxAge),
-			cache.WithUpdateAgeOnGet[K, *conn](),
-			cache.WithEvict[K, *conn](func(key K, conn *conn) {
-				conn.Close()
-			}),
-		),
+		nat:     cache.New(options...),
 		handler: handler,
 	}
 }
@@ -71,36 +83,55 @@ func (s *Service[T]) NewContextPacket(ctx context.Context, key T, buffer *buf.Bu
 	c, loaded := s.nat.LoadOrStore(key, func() *conn {
 		c := &conn{
 			data:         make(chan packet, 64),
-			localAddr:    metadata.Source,
 			remoteAddr:   metadata.Destination,
 			readDeadline: pipe.MakeDeadline(),
 		}
+		c.localAddr.Store(&metadata.Source)
 		c.ctx, c.cancel = common.ContextWithCancelCause(ctx)
 		return c
 	})
 	if !loaded {
-		ctx, c.source = init(c)
+		initCtx, source := init(c)
+		c.sourceMu.Lock()
+		c.source = source
+		alreadyClosed := c.closed
+		c.sourceMu.Unlock()
+		if alreadyClosed {
+			if sourceCloser, sourceIsCloser := source.(io.Closer); sourceIsCloser {
+				_ = sourceCloser.Close()
+			}
+		}
 		go func() {
-			err := s.handler.NewPacketConnection(ctx, c, metadata)
+			err := s.handler.NewPacketConnection(initCtx, c, metadata)
 			if err != nil {
-				s.handler.NewError(ctx, err)
+				s.handler.NewError(initCtx, err)
 			}
 			c.Close()
 			s.nat.Delete(key)
 		}()
 	} else {
-		c.localAddr = metadata.Source
+		addr := metadata.Source
+		c.localAddr.Store(&addr)
 	}
 	if common.Done(c.ctx) {
 		s.nat.Delete(key)
 		if !common.Done(ctx) {
 			s.NewContextPacket(ctx, key, buffer, metadata, init)
+		} else {
+			buffer.Release()
 		}
 		return
 	}
-	c.data <- packet{
+	select {
+	case c.data <- packet{
 		data:        buffer,
 		destination: metadata.Destination,
+	}:
+	case <-c.ctx.Done():
+		buffer.Release()
+	default:
+		// Drop packet instead of stalling the shared dispatcher when a NAT entry backs up.
+		buffer.Release()
 	}
 }
 
@@ -115,9 +146,11 @@ type conn struct {
 	ctx             context.Context
 	cancel          common.ContextCancelCauseFunc
 	data            chan packet
-	localAddr       M.Socksaddr
+	localAddr       atomic.Pointer[M.Socksaddr]
 	remoteAddr      M.Socksaddr
+	sourceMu        sync.Mutex
 	source          N.PacketWriter
+	closed          bool
 	readDeadline    pipe.Deadline
 	readWaitOptions N.ReadWaitOptions
 }
@@ -136,7 +169,14 @@ func (c *conn) ReadPacket(buffer *buf.Buffer) (addr M.Socksaddr, err error) {
 }
 
 func (c *conn) WritePacket(buffer *buf.Buffer, destination M.Socksaddr) error {
-	return c.source.WritePacket(buffer, destination)
+	c.sourceMu.Lock()
+	source := c.source
+	c.sourceMu.Unlock()
+	if source == nil {
+		buffer.Release()
+		return io.ErrClosedPipe
+	}
+	return source.WritePacket(buffer, destination)
 }
 
 func (c *conn) Close() error {
@@ -145,14 +185,28 @@ func (c *conn) Close() error {
 	default:
 		c.cancel(net.ErrClosed)
 	}
-	if sourceCloser, sourceIsCloser := c.source.(io.Closer); sourceIsCloser {
-		return sourceCloser.Close()
+	c.sourceMu.Lock()
+	c.closed = true
+	source := c.source
+	c.sourceMu.Unlock()
+	for {
+		select {
+		case p := <-c.data:
+			p.data.Release()
+		default:
+			if sourceCloser, sourceIsCloser := source.(io.Closer); sourceIsCloser {
+				return sourceCloser.Close()
+			}
+			return nil
+		}
 	}
-	return nil
 }
 
 func (c *conn) LocalAddr() net.Addr {
-	return c.localAddr
+	if addr := c.localAddr.Load(); addr != nil {
+		return *addr
+	}
+	return M.Socksaddr{}
 }
 
 func (c *conn) RemoteAddr() net.Addr {
@@ -177,5 +231,8 @@ func (c *conn) NeedAdditionalReadDeadline() bool {
 }
 
 func (c *conn) Upstream() any {
-	return c.source
+	c.sourceMu.Lock()
+	source := c.source
+	c.sourceMu.Unlock()
+	return source
 }

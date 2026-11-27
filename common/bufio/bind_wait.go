@@ -53,10 +53,17 @@ func (w *serverPacketReadWaiter) InitializeReadWaiter(options N.ReadWaitOptions)
 }
 
 func (w *serverPacketReadWaiter) WaitReadBuffer() (buffer *buf.Buffer, err error) {
-	buffer, destination, err := w.readWaiter.WaitReadPacket()
-	if err != nil {
+	for {
+		var destination M.Socksaddr
+		buffer, destination, err = w.readWaiter.WaitReadPacket()
+		if err != nil {
+			return
+		}
+		if !w.isAllowedSource(destination) {
+			buffer.Release()
+			continue
+		}
+		w.remoteAddr.Store(&destination)
 		return
 	}
-	w.remoteAddr = destination
-	return
 }

@@ -2,10 +2,14 @@ package rw
 
 import (
 	"io"
+	"math"
 
 	"github.com/metacubex/sing/common"
 	"github.com/metacubex/sing/common/binary"
+	E "github.com/metacubex/sing/common/exceptions"
 )
+
+const MaxVStringLen = 1 << 20 // 1 MiB default upper bound for ReadVString
 
 type stubByteReader struct {
 	io.Reader
@@ -52,13 +56,17 @@ func UvarintLen(x uint64) int {
 		return 6
 	case x < 1<<(7*7):
 		return 7
-	default:
+	case x < 1<<(7*8):
 		return 8
+	case x < 1<<(7*9):
+		return 9
+	default:
+		return 10
 	}
 }
 
 func WriteUVariant(writer io.Writer, value uint64) error {
-	var b [8]byte
+	var b [binary.MaxVarintLen64]byte
 	return common.Error(writer.Write(b[:binary.PutUvarint(b[:], value)]))
 }
 
@@ -71,9 +79,22 @@ func WriteVString(writer io.Writer, value string) error {
 }
 
 func ReadVString(reader io.Reader) (string, error) {
+	return ReadVStringLimit(reader, MaxVStringLen)
+}
+
+func ReadVStringLimit(reader io.Reader, maxLen int) (string, error) {
 	length, err := ReadUVariant(reader)
 	if err != nil {
 		return "", err
+	}
+	if maxLen < 0 {
+		maxLen = 0
+	}
+	if length > uint64(maxLen) || length > math.MaxInt {
+		return "", E.New("vstring length exceeds limit: ", length)
+	}
+	if length == 0 {
+		return "", nil
 	}
 	return ReadString(reader, int(length))
 }

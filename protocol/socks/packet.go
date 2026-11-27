@@ -3,6 +3,7 @@ package socks
 import (
 	"bytes"
 	"net"
+	"sync/atomic"
 
 	"github.com/metacubex/sing/common"
 	"github.com/metacubex/sing/common/buf"
@@ -23,17 +24,18 @@ var ErrInvalidPacket = E.New("socks5: invalid packet")
 type AssociatePacketConn struct {
 	N.AbstractConn
 	conn       N.ExtendedConn
-	remoteAddr M.Socksaddr
+	remoteAddr atomic.Pointer[M.Socksaddr]
 	underlying net.Conn
 }
 
 func NewAssociatePacketConn(conn net.Conn, remoteAddr M.Socksaddr, underlying net.Conn) *AssociatePacketConn {
-	return &AssociatePacketConn{
+	c := &AssociatePacketConn{
 		AbstractConn: conn,
 		conn:         bufio.NewExtendedConn(conn),
-		remoteAddr:   remoteAddr,
 		underlying:   underlying,
 	}
+	c.remoteAddr.Store(&remoteAddr)
+	return c
 }
 
 func (c *AssociatePacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err error) {
@@ -41,7 +43,7 @@ func (c *AssociatePacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err erro
 	if err != nil {
 		return
 	}
-	if n < 3 {
+	if n < 3 || p[2] != 0 {
 		return 0, nil, ErrInvalidPacket
 	}
 	reader := bytes.NewReader(p[3:n])
@@ -49,7 +51,7 @@ func (c *AssociatePacketConn) ReadFrom(p []byte) (n int, addr net.Addr, err erro
 	if err != nil {
 		return
 	}
-	c.remoteAddr = destination
+	c.remoteAddr.Store(&destination)
 	addr = destination.UDPAddr()
 	index := 3 + int(reader.Size()) - reader.Len()
 	n = copy(p, p[index:n])
@@ -77,7 +79,7 @@ func (c *AssociatePacketConn) ReadPacket(buffer *buf.Buffer) (destination M.Sock
 	if err != nil {
 		return
 	}
-	if buffer.Len() < 3 {
+	if buffer.Len() < 3 || buffer.Byte(2) != 0 {
 		return M.Socksaddr{}, ErrInvalidPacket
 	}
 	buffer.Advance(3)
@@ -85,7 +87,7 @@ func (c *AssociatePacketConn) ReadPacket(buffer *buf.Buffer) (destination M.Sock
 	if err != nil {
 		return
 	}
-	c.remoteAddr = destination
+	c.remoteAddr.Store(&destination)
 	return destination.Unwrap(), nil
 }
 
@@ -105,11 +107,18 @@ func (c *AssociatePacketConn) Read(b []byte) (n int, err error) {
 }
 
 func (c *AssociatePacketConn) Write(b []byte) (n int, err error) {
-	return c.WriteTo(b, c.remoteAddr)
+	remote := c.remoteAddr.Load()
+	if remote == nil {
+		return 0, ErrInvalidPacket
+	}
+	return c.WriteTo(b, *remote)
 }
 
 func (c *AssociatePacketConn) RemoteAddr() net.Addr {
-	return c.remoteAddr.UDPAddr()
+	if remote := c.remoteAddr.Load(); remote != nil {
+		return remote.UDPAddr()
+	}
+	return M.Socksaddr{}.UDPAddr()
 }
 
 func (c *AssociatePacketConn) Upstream() any {

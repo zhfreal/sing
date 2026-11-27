@@ -18,15 +18,16 @@ type VectorisedAssociatePacketConn struct {
 }
 
 func NewVectorisedAssociateConn(conn net.Conn, writer N.VectorisedWriter, remoteAddr M.Socksaddr, underlying net.Conn) *VectorisedAssociatePacketConn {
-	return &VectorisedAssociatePacketConn{
-		AssociatePacketConn{
+	c := &VectorisedAssociatePacketConn{
+		AssociatePacketConn: AssociatePacketConn{
 			AbstractConn: conn,
 			conn:         bufio.NewExtendedConn(conn),
-			remoteAddr:   remoteAddr,
 			underlying:   underlying,
 		},
-		&bufio.UnbindVectorisedPacketWriter{VectorisedWriter: writer},
+		VectorisedPacketWriter: &bufio.UnbindVectorisedPacketWriter{VectorisedWriter: writer},
 	}
+	c.remoteAddr.Store(&remoteAddr)
+	return c
 }
 
 func (c *VectorisedAssociatePacketConn) WriteVectorisedPacket(buffers []*buf.Buffer, destination M.Socksaddr) error {

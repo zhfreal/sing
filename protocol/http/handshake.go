@@ -36,14 +36,16 @@ func HandleConnection(ctx context.Context, conn net.Conn, reader *std_bufio.Read
 			)
 			authorization := request.Header.Get("Proxy-Authorization")
 			if strings.HasPrefix(authorization, "Basic ") {
-				userPassword, _ := base64.URLEncoding.DecodeString(authorization[6:])
-				userPswdArr := strings.SplitN(string(userPassword), ":", 2)
-				if len(userPswdArr) == 2 {
-					username = userPswdArr[0]
-					password = userPswdArr[1]
-					authOk = authenticator.Verify(username, password)
-					if authOk {
-						ctx = auth.ContextWithUser(ctx, userPswdArr[0])
+				userPassword, decodeErr := base64.StdEncoding.DecodeString(authorization[6:])
+				if decodeErr == nil {
+					userPswdArr := strings.SplitN(string(userPassword), ":", 2)
+					if len(userPswdArr) == 2 {
+						username = userPswdArr[0]
+						password = userPswdArr[1]
+						authOk = authenticator.Verify(username, password)
+						if authOk {
+							ctx = auth.ContextWithUser(ctx, userPswdArr[0])
+						}
 					}
 				}
 			}
@@ -57,9 +59,9 @@ func HandleConnection(ctx context.Context, conn net.Conn, reader *std_bufio.Read
 					return err
 				}
 				if username != "" {
-					return E.New("http: authentication failed, username=", username, ", password=", password)
+					return E.New("http: authentication failed, username=", username)
 				} else if authorization != "" {
-					return E.New("http: authentication failed, Proxy-Authorization=", authorization)
+					return E.New("http: authentication failed, invalid Proxy-Authorization header")
 				} else {
 					return E.New("http: authentication failed, no Proxy-Authorization header")
 				}
@@ -118,6 +120,8 @@ func HandleConnection(ctx context.Context, conn net.Conn, reader *std_bufio.Read
 					common.Close(serverConn, clientConn)
 				}
 			}()
+			request.Header.Del("Proxy-Authorization")
+			request.Header.Del("Proxy-Connection")
 			err = request.Write(serverConn)
 			if err != nil {
 				return E.Cause(err, "http: write upgrade request")

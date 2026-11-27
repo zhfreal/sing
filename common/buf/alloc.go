@@ -88,8 +88,11 @@ func (alloc *defaultAllocator) Get(size int) []byte {
 // Put returns a []byte to pool for future use,
 // which the cap must be exactly 2^n
 func (alloc *defaultAllocator) Put(buf []byte) error {
+	if cap(buf) < 64 || cap(buf) > 65536 {
+		return errors.New("allocator Put() incorrect buffer size")
+	}
 	bits := msb(cap(buf))
-	if cap(buf) == 0 || cap(buf) > 65536 || cap(buf) != 1<<bits {
+	if cap(buf) != 1<<bits {
 		return errors.New("allocator Put() incorrect buffer size")
 	}
 	bits -= 6
